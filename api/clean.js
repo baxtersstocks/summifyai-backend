@@ -1,6 +1,18 @@
 import fetch from "node-fetch";
 import { JSDOM } from "jsdom";
 
+/* =========================
+   CORS HELPER
+========================= */
+function setCors(res) {
+  res.setHeader("Access-Control-Allow-Origin", "https://baxtersstocks.github.io");
+  res.setHeader("Access-Control-Allow-Methods", "POST, OPTIONS");
+  res.setHeader("Access-Control-Allow-Headers", "Content-Type");
+}
+
+/* =========================
+   UTILS
+========================= */
 function isUrl(text) {
   try {
     new URL(text);
@@ -10,67 +22,73 @@ function isUrl(text) {
   }
 }
 
-async function fetchUrlText(url) {
-  const res = await fetch(url, {
+async function fetchArticleText(url) {
+  const response = await fetch(url, {
     headers: { "User-Agent": "SummifyAI/1.0" }
   });
 
-  const html = await res.text();
+  const html = await response.text();
   const dom = new JSDOM(html);
   const doc = dom.window.document;
 
-  doc.querySelectorAll("script, style, nav, footer, header").forEach(el => el.remove());
+  // Remove junk
+  doc.querySelectorAll("script, style, nav, footer, header, noscript").forEach(el => el.remove());
 
-  return doc.body.textContent.replace(/\s+/g, " ").slice(0, 12000);
+  const text = doc.body.textContent || "";
+  return text.replace(/\s+/g, " ").trim().slice(0, 12000);
 }
 
+/* =========================
+   API HANDLER
+========================= */
 export default async function handler(req, res) {
+  setCors(res);
+
+  // Preflight
+  if (req.method === "OPTIONS") {
+    return res.status(200).end();
+  }
+
   if (req.method !== "POST") {
-    res.status(405).json({ error: "Only POST allowed" });
-    return;
+    return res.status(405).json({ error: "Only POST allowed" });
   }
 
-  const { inputs, mode } = req.body;
+  try {
+    const { text, mode } = req.body;
 
-  const processed = [];
-
-  for (const input of inputs) {
-    if (isUrl(input)) {
-      try {
-        const text = await fetchUrlText(input);
-        processed.push(text);
-      } catch {
-        processed.push("Failed to fetch URL content.");
-      }
-    } else {
-      processed.push(input);
+    if (!text) {
+      return res.status(400).json({ error: "No input provided" });
     }
+
+    let content = text;
+
+    if (isUrl(text)) {
+      content = await fetchArticleText(text);
+    }
+
+    // VERY simple “cleaning” for now
+    let result;
+    switch (mode) {
+      case "timeline":
+        result = content.split(". ").slice(0, 10).map((s, i) => `${i + 1}. ${s}`).join("\n");
+        break;
+      case "eli5":
+        result = content.slice(0, 800);
+        break;
+      case "investor":
+        result = content.slice(0, 1000);
+        break;
+      case "drama":
+        result = content.slice(0, 900);
+        break;
+      default:
+        result = content.slice(0, 1200);
+    }
+
+    return res.status(200).json({ result });
+
+  } catch (err) {
+    console.error(err);
+    return res.status(500).json({ error: "Server error" });
   }
-
-  const prompt = `
-Summarize and organize this content clearly.
-
-MODE: ${mode}
-
-CONTENT:
-${processed.join("\n\n")}
-`;
-
-  const aiRes = await fetch("https://api.openai.com/v1/chat/completions", {
-    method: "POST",
-    headers: {
-      "Authorization": `Bearer ${process.env.OPENAI_API_KEY}`,
-      "Content-Type": "application/json"
-    },
-    body: JSON.stringify({
-      model: "gpt-4o-mini",
-      messages: [{ role: "user", content: prompt }]
-    })
-  });
-
-  const data = await aiRes.json();
-
-  res.status(200).json({
-    output: data.choices[0].message.content
-  });
 }
